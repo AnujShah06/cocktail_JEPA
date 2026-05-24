@@ -33,6 +33,13 @@ class TokenEncoder(nn.Module):
                                            padding_idx=PAD_ID)
         # project the Fourier proportion vector into model space
         self.proportion_proj = nn.Linear(prop_dim, d_model)
+        # learnable per-dimension gate on the proportion signal. The
+        # ingredient embedding is a large, well-trained signal; without a
+        # gate, summing ing + prop lets it swamp the (weaker) proportion
+        # signal, leaving the model nearly blind to proportion structure.
+        # The gate lets training choose how much proportion to admit.
+        # Initialized to 1.0 so this starts identical to plain summation.
+        self.proportion_gate = nn.Parameter(torch.ones(d_model))
         # the learned [MASK] embedding, substituted at masked slots
         self.mask_token = nn.Parameter(torch.zeros(d_model))
         nn.init.normal_(self.mask_token, std=0.02)
@@ -45,7 +52,7 @@ class TokenEncoder(nn.Module):
         """Return token embeddings [B, L, d_model]."""
         ing = self.ingredient_emb(ingredient_ids)          # [B, L, d]
         prop = self.proportion_proj(proportions)           # [B, L, d]
-        return ing + prop
+        return ing + self.proportion_gate * prop
 
     def apply_mask(
         self,
