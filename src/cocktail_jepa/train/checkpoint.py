@@ -58,7 +58,15 @@ def load_checkpoint(
     blob = torch.load(path, map_location=map_location, weights_only=False)
     cfg = JEPAConfig(**blob["config"])
     model = CocktailJEPA(cfg)
-    model.load_state_dict(blob["model_state"])
+    # strict=False so checkpoints saved before a parameter was added
+    # (e.g. the proportion_gate) still load -- any missing parameter keeps
+    # its default initialization, which for the gate is 1.0 (a no-op).
+    missing, unexpected = model.load_state_dict(blob["model_state"],
+                                                strict=False)
+    if missing:
+        print(f"[checkpoint] using defaults for absent keys: {list(missing)}")
+    if unexpected:
+        print(f"[checkpoint] ignoring unknown keys: {list(unexpected)}")
     return {
         "model": model,
         "config": cfg,
