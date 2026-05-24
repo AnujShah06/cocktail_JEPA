@@ -46,7 +46,7 @@ class JEPAConfig:
     pred_heads: int = 6
     dropout: float = 0.1
     ema_decay: float = 0.996
-    var_weight: float = 1.0
+    var_weight: float = 0.5
     cov_weight: float = 0.04
 
 
