@@ -1,0 +1,42 @@
+[project]
+name = "cocktail-jepa"
+version = "0.1.0"
+description = "Self-supervised energy-based modeling of cocktail structure with a JEPA"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+
+dependencies = [
+    # --- core ML ---
+    "torch>=2.2",
+    "numpy>=1.26",
+    # --- data prep (Stage 1) ---
+    "pandas>=2.1",
+    "pyyaml>=6.0",
+    # --- notebooks & demo ---
+    "marimo>=0.9",
+    # --- experiment tracking (dormant until Stage 3; import is cheap) ---
+    "wandb>=0.17",
+    # --- utilities ---
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",          # linter + formatter, one tool
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cocktail_jepa"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

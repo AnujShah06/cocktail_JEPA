@@ -1,0 +1,29 @@
+# --- environments ---
+.venv/
+__pycache__/
+*.pyc
+.python-version
+
+# --- data: corpus is synced separately, never committed ---
+corpus/*
+!corpus/.gitkeep
+
+# --- training artifacts: checkpoints + logs stay local / in cloud storage ---
+runs/*
+!runs/.gitkeep
+*.ckpt
+*.pt
+wandb/
+
+# --- secrets: API keys, cloud credentials ---
+.env
+*.key
+
+# --- editor / OS noise ---
+.DS_Store
+.idea/
+.vscode/
+.ipynb_checkpoints/
+
+# --- marimo autosave ---
+__marimo__/
