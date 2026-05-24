@@ -35,6 +35,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
+from cocktail_jepa.config import CONFIG
 from cocktail_jepa.data.vocab import N_SPECIAL, PAD_ID, Vocabulary
 from cocktail_jepa.energy.energy import recipe_energy
 from cocktail_jepa.model.jepa import CocktailJEPA
@@ -49,6 +50,37 @@ class GenConfig:
     temp_start: float = 1.0     # softmax temperature at step 0
     temp_end: float = 0.05      # softmax temperature at the final step
     seed: int = 0
+    min_count: int = 3          # only ingredients seen >= this many times
+                                # are generatable -- excludes the long-tail
+                                # junk tokens with barely-trained embeddings
+
+
+def generatable_ids(vocab: Vocabulary, min_count: int) -> set[int]:
+    """
+    Ingredient ids the generator is ALLOWED to produce.
+
+    The corpus vocabulary has a long tail (~500 of ~825 tokens seen < 3
+    times), a mix of genuinely rare ingredients and normalization
+    artifacts ('one sugar', 'lime juice wedge'). Their embeddings are
+    barely trained, so the generator should not invent them. A fixed
+    --have ingredient may still be rare; this only constrains what is
+    GENERATED.
+
+    Falls back gracefully if the vocabulary carries no counts.
+    """
+    import json
+    try:
+        obj = json.load(open(CONFIG.paths.vocabulary, encoding="utf-8"))
+        keep = set()
+        for item in obj["ingredients"]:
+            if item.get("count", 0) >= min_count:
+                idx = vocab.token_to_id.get(item["name"])
+                if idx is not None:
+                    keep.add(idx)
+        return keep if keep else set(range(N_SPECIAL, len(vocab)))
+    except Exception:
+        # no counts available -- allow every real ingredient
+        return set(range(N_SPECIAL, len(vocab)))
 
 
 def _build_recipe_batch(
@@ -87,14 +119,31 @@ def _build_recipe_batch(
 
 
 @torch.no_grad()
-def _snap(
-    logits: torch.Tensor,       # [n_empty, vocab_size]
-) -> list[int]:
-    """Snap each soft mixture to its single nearest real ingredient id."""
-    # special tokens (PAD, MASK) are never valid generated ingredients
-    masked = logits.clone()
-    masked[:, :N_SPECIAL] = float("-inf")
-    return masked.argmax(dim=1).tolist()
+def _snap_one(
+    logits_row: torch.Tensor,       # [vocab_size]  one slot's mixture
+    allowed: set[int],
+    used: set[int],
+) -> int:
+    """
+    Snap a single soft mixture to its best real ingredient, subject to
+    two constraints:
+      * the ingredient must be in `allowed` (the generatable pool --
+        excludes long-tail junk tokens)
+      * the ingredient must not be in `used` (no duplicate ingredient,
+        whether the duplicate is a fixed one or an already-generated one)
+    Picks the highest-logit ingredient that satisfies both.
+    """
+    order = torch.argsort(logits_row, descending=True).tolist()
+    for idx in order:
+        if idx < N_SPECIAL:
+            continue
+        if idx in allowed and idx not in used:
+            return idx
+    # fallback: allowed pool exhausted -- take best unused real ingredient
+    for idx in order:
+        if idx >= N_SPECIAL and idx not in used:
+            return idx
+    return order[0]
 
 
 def _relaxed_energy(
@@ -188,6 +237,10 @@ def generate(
     fixed_ids = [vocab.encode(name) for name in fixed_ingredients]
     vocab_size = len(vocab)
 
+    # ingredients the generator may produce: the well-supported pool,
+    # minus anything already fixed (no duplicates with --have inputs)
+    allowed = generatable_ids(vocab, cfg.min_count)
+
     best_energy = float("inf")
     best_ids: list[int] = []
     per_restart: list[float] = []
@@ -208,8 +261,18 @@ def generate(
             energy.backward()
             opt.step()
 
-        # snap to discrete ingredients and RE-SCORE honestly with energy.py
-        gen_ids = _snap(logits.detach())
+        # snap each slot in turn, forbidding duplicates: a generated
+        # ingredient may not repeat a fixed one or an earlier generated
+        # one. `used` grows as slots are committed.
+        used = set(fixed_ids)
+        gen_ids: list[int] = []
+        final_logits = logits.detach()
+        for j in range(n_generate):
+            idx = _snap_one(final_logits[j], allowed, used)
+            gen_ids.append(idx)
+            used.add(idx)
+
+        # re-score honestly with the discrete energy from energy.py
         batch = _build_recipe_batch(fixed_ids + gen_ids, 0,
                                     prop_dim, max_len, device)
         true_energy = float(recipe_energy(model, batch, device=device)[0])
