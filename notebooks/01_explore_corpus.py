@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.9.0"
+__generated_with = "0.23.8"
 app = marimo.App(width="medium")
 
 
@@ -9,22 +9,21 @@ def _():
     import marimo as mo
     import json
     from cocktail_jepa.config import CONFIG
+
     return CONFIG, json, mo
 
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        # Cocktail JEPA -- corpus exploration
+    mo.md("""
+    # Cocktail JEPA -- corpus exploration
 
-        This notebook is the cockpit for **Stage 1**: looking at the data
-        before any encoding code is written. marimo notebooks are plain
-        `.py` files, so this versions in git like real code.
+    This notebook is the cockpit for **Stage 1**: looking at the data
+    before any encoding code is written. marimo notebooks are plain
+    `.py` files, so this versions in git like real code.
 
-        Nothing here trains anything -- it's for *seeing* the corpus.
-        """
-    )
+    Nothing here trains anything -- it's for *seeing* the corpus.
+    """)
     return
 
 
@@ -37,7 +36,7 @@ def _(CONFIG, json):
     ]
     vocab = json.load(open(CONFIG.paths.vocabulary, encoding="utf-8"))
     len(recipes), vocab["size"]
-    return recipes, vocab
+    return (recipes,)
 
 
 @app.cell
@@ -50,7 +49,7 @@ def _(mo, recipes):
         max {max(sizes)}
         """
     )
-    return (sizes,)
+    return
 
 
 @app.cell
@@ -70,21 +69,19 @@ def _(idx, mo, recipes):
         for i in r["ingredients"]
     )
     mo.md(f"### {r['name']}  \n*source: {r['source']}*\n\n{rows}")
-    return r, rows
+    return
 
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-        ---
-        ### Next
+    mo.md("""
+    ---
+    ### Next
 
-        Stage 1 proper: build the ingredient embedding table, the Fourier
-        proportion encoding, the leakage-controlled splits, and the
-        perturbation set. Those go in `src/cocktail_jepa/data/`.
-        """
-    )
+    Stage 1 proper: build the ingredient embedding table, the Fourier
+    proportion encoding, the leakage-controlled splits, and the
+    perturbation set. Those go in `src/cocktail_jepa/data/`.
+    """)
     return
 
 
