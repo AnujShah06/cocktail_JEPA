@@ -56,7 +56,23 @@ def load_checkpoint(
     use directly, or for the loop to resume from.
     """
     blob = torch.load(path, map_location=map_location, weights_only=False)
-    cfg = JEPAConfig(**blob["config"])
+
+    # JEPAConfig's fields change across versions (#18 removed var_weight /
+    # cov_weight; #4/#13/#18 added sigreg_*, proportion_aux_weight,
+    # coarse_*).  A checkpoint saved by an older version carries config
+    # keys this JEPAConfig no longer accepts, and would crash JEPAConfig(
+    # **config).  Filter the saved config down to the fields the current
+    # JEPAConfig actually declares; any field the old checkpoint lacks
+    # keeps the current default (e.g. coarse_size=None -> the TokenEncoder
+    # degenerate single-coarse mode, sigreg_weight its default).
+    import dataclasses
+    valid_fields = {f.name for f in dataclasses.fields(JEPAConfig)}
+    raw_config = blob["config"]
+    dropped = sorted(set(raw_config) - valid_fields)
+    config = {k: v for k, v in raw_config.items() if k in valid_fields}
+    if dropped:
+        print(f"[checkpoint] ignoring obsolete config keys: {dropped}")
+    cfg = JEPAConfig(**config)
     model = CocktailJEPA(cfg)
     # strict=False so checkpoints saved before a parameter was added
     # (e.g. the proportion_gate) still load -- any missing parameter keeps

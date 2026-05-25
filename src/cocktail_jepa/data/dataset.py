@@ -65,17 +65,27 @@ class CocktailDataset(Dataset):
         ids = np.full(self.max_len, PAD_ID, dtype=np.int64)
         props = np.zeros((self.max_len, self.prop_dim), dtype=np.float32)
         pad_mask = np.zeros(self.max_len, dtype=bool)
+        # raw proportion scalar per slot, kept ALONGSIDE the Fourier
+        # encoding so the #13 proportion auxiliary loss can supervise
+        # against an exact target instead of inverting the encoding.
+        # -1.0 marks "no proportion" (the slot is padding, or the recipe
+        # had no parseable quantity) -- the model masks these out via the
+        # Fourier encoding's known-flag, so the sentinel value is never
+        # used as a real target.
+        raw_prop = np.full(self.max_len, -1.0, dtype=np.float32)
 
         for i, ing in enumerate(ings):
             ids[i] = self.vocab.encode(ing["ingredient"])
-            props[i] = fourier_proportion_encoding(
-                ing.get("proportion"), self.n_frequencies
-            )
+            p = ing.get("proportion")
+            props[i] = fourier_proportion_encoding(p, self.n_frequencies)
+            if p is not None:
+                raw_prop[i] = float(p)
             pad_mask[i] = True
 
         return {
             "ingredient_ids": torch.from_numpy(ids),
             "proportions": torch.from_numpy(props),
+            "raw_proportion": torch.from_numpy(raw_prop),
             "pad_mask": torch.from_numpy(pad_mask),
             "n_ingredients": n,
             "recipe_id": recipe.get("recipe_id", ""),
@@ -87,6 +97,7 @@ def _stack(batch: list[dict]) -> dict:
     return {
         "ingredient_ids": torch.stack([b["ingredient_ids"] for b in batch]),
         "proportions": torch.stack([b["proportions"] for b in batch]),
+        "raw_proportion": torch.stack([b["raw_proportion"] for b in batch]),
         "pad_mask": torch.stack([b["pad_mask"] for b in batch]),
         "n_ingredients": torch.tensor([b["n_ingredients"] for b in batch]),
         "recipe_id": [b["recipe_id"] for b in batch],
@@ -128,6 +139,13 @@ class JEPAMaskCollator:
             else:
                 mask_index[b] = self._rng.randint(0, n - 1)
         out["mask_index"] = mask_index
+
+        # the masked slot's raw proportion scalar, the exact target for the
+        # #13 proportion auxiliary loss.  -1.0 where the masked slot had no
+        # parseable proportion; jepa.py masks those out via the Fourier
+        # known-flag, so the sentinel is never used as a real target.
+        batch_idx = torch.arange(B)
+        out["target_proportion"] = out["raw_proportion"][batch_idx, mask_index]
         return out
 
 

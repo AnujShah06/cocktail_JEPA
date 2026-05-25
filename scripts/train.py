@@ -37,6 +37,12 @@ def main() -> int:
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--max-len", type=int, default=12)
     ap.add_argument("--n-frequencies", type=int, default=6)
+    # Phase-2 hyperparameters. --sigreg-weight is the LeJEPA single
+    # regularizer trade-off (#18); the lambda sweep varies this.
+    # --proportion-aux-weight is the #13 auxiliary-loss weight, held
+    # fixed across the sweep so the sweep isolates the lambda effect.
+    ap.add_argument("--sigreg-weight", type=float, default=1.0)
+    ap.add_argument("--proportion-aux-weight", type=float, default=0.5)
     ap.add_argument("--smoke", action="store_true",
                     help="tiny fast run to verify the loop works")
     args = ap.parse_args()
@@ -73,8 +79,17 @@ def main() -> int:
         collate_fn=JEPAMaskCollator(deterministic=True),
     )
 
-    # model
-    model = build_jepa(vocab_size=len(vocab), prop_dim=prop_dim)
+    # model -- the coarse vocabulary (#4) is passed through so the
+    # TokenEncoder builds its hierarchical coarse+fine embedding.  Omitting
+    # these would silently construct a DEGENERATE single-coarse model and
+    # #4 would contribute nothing.
+    model = build_jepa(
+        vocab_size=len(vocab), prop_dim=prop_dim,
+        coarse_size=vocab.coarse_size,
+        coarse_ids=vocab.coarse_ids,
+        sigreg_weight=args.sigreg_weight,
+        proportion_aux_weight=args.proportion_aux_weight,
+    )
     print(f"device: {CONFIG.device}")
     print(f"model parameters: {model.num_parameters()}")
     print(f"train recipes: {len(train_ds)}  val recipes: {len(val_ds)}")
@@ -84,6 +99,8 @@ def main() -> int:
         run_name=args.run_name,
         config={"epochs": args.epochs, "batch_size": args.batch_size,
                 "lr": args.lr, "device": CONFIG.device,
+                "sigreg_weight": args.sigreg_weight,
+                "proportion_aux_weight": args.proportion_aux_weight,
                 "model": model.num_parameters()},
         tags=["stage3", "smoke" if args.smoke else "full"],
     )

@@ -68,7 +68,8 @@ def evaluate(model: CocktailJEPA, loader: DataLoader, device: str) -> dict:
     accumulated context embeddings.
     """
     model.eval()
-    sums = {"loss": 0.0, "pred_loss": 0.0, "var_term": 0.0, "cov_term": 0.0}
+    sums = {"loss": 0.0, "pred_loss": 0.0,
+            "sigreg_term": 0.0, "proportion_aux": 0.0}
     n_batches = 0
     emb_chunks = []
     for batch in loader:

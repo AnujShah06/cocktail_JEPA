@@ -9,6 +9,29 @@ Two jobs:
      fixed-width Fourier feature vector, so the network sees magnitude at
      multiple frequencies rather than one raw number it must learn to scale.
 
+HIERARCHICAL VOCABULARY (Phase-1 fix #4)
+----------------------------------------
+Every ingredient now carries TWO ids:
+  * a FINE id   -- the specific canonical ingredient ("bourbon", "scotch")
+  * a COARSE id -- its category-or-spirit-family ("whiskey" for both of the
+                   above; "juice", "sweetener", ... for non-spirits)
+The model token becomes  embedding(coarse) + embedding(fine)  -- the coarse
+embedding is shared across every fine token in the family, so bourbon and
+scotch are distinct fine tokens that nonetheless share a "whiskey" signal.
+
+`Vocabulary` exposes `coarse_ids` -- a list indexed by fine id giving the
+coarse id for that fine token (with [PAD]/[MASK] mapping to coarse
+[PAD]/[MASK]).  `model/tokens.py` reads this to drive the second embedding.
+
+BACKWARD COMPATIBILITY
+----------------------
+Old vocabulary.json files (pre-#4) have no "coarse_vocab" and their
+ingredient entries have no "coarse" field.  `from_file` detects this and
+builds a degenerate coarse vocabulary -- a single "[JUNK]" coarse token
+that every fine ingredient maps to -- so old files still load.  A model
+trained on the new vocabulary should be retrained, not loaded against an
+old file, but the loader will not crash.
+
 This module produces NO masking and NO tensors-per-recipe -- it is the
 lookup layer the Dataset builds on.
 """
@@ -23,21 +46,67 @@ import numpy as np
 
 PAD_TOKEN = "[PAD]"
 MASK_TOKEN = "[MASK]"
+JUNK_TOKEN = "[JUNK]"
 PAD_ID = 0
 MASK_ID = 1
 N_SPECIAL = 2  # ids 0,1 reserved; real ingredients start at 2
 
+# coarse ids 0,1 mirror the fine special tokens
+COARSE_PAD_ID = 0
+COARSE_MASK_ID = 1
+
 
 class Vocabulary:
-    """Bidirectional ingredient <-> id map, built from vocabulary.json."""
+    """
+    Bidirectional ingredient <-> id map, built from vocabulary.json.
 
-    def __init__(self, ingredients: list[str]):
-        # ingredients: canonical strings, most-frequent-first is fine but
-        # order only affects id assignment, nothing else.
+    Holds BOTH levels of the hierarchical vocabulary:
+      * the fine level   (id_to_token / token_to_id)  -- specific ingredient
+      * the coarse level (coarse_id_to_token / ...)    -- category|family
+      * coarse_ids[fine_id] -> coarse_id               -- the link between them
+    """
+
+    def __init__(
+        self,
+        ingredients: list[str],
+        coarse_vocab: list[str] | None = None,
+        fine_to_coarse: list[int] | None = None,
+    ):
+        # ---- fine level --------------------------------------------------
+        # ingredients: canonical strings; order only affects id assignment.
         self.id_to_token: list[str] = [PAD_TOKEN, MASK_TOKEN] + list(ingredients)
         self.token_to_id: dict[str, int] = {
             tok: i for i, tok in enumerate(self.id_to_token)
         }
+
+        # ---- coarse level ------------------------------------------------
+        if coarse_vocab is None or fine_to_coarse is None:
+            # degenerate fallback (old file / ad-hoc construction): a single
+            # [JUNK] coarse token that every real ingredient maps to.
+            self.coarse_id_to_token: list[str] = [
+                PAD_TOKEN, MASK_TOKEN, JUNK_TOKEN
+            ]
+            junk_id = 2
+            self.coarse_ids: list[int] = (
+                [COARSE_PAD_ID, COARSE_MASK_ID]
+                + [junk_id] * len(ingredients)
+            )
+        else:
+            self.coarse_id_to_token = list(coarse_vocab)
+            # fine_to_coarse is given for the real ingredients only; prepend
+            # the two special-token mappings so it is indexed by fine id.
+            self.coarse_ids = (
+                [COARSE_PAD_ID, COARSE_MASK_ID] + list(fine_to_coarse)
+            )
+
+        self.coarse_token_to_id: dict[str, int] = {
+            tok: i for i, tok in enumerate(self.coarse_id_to_token)
+        }
+
+        # internal consistency: one coarse id per fine id
+        assert len(self.coarse_ids) == len(self.id_to_token), (
+            "coarse_ids must be parallel to id_to_token"
+        )
 
     def __len__(self) -> int:
         return len(self.id_to_token)
@@ -47,8 +116,13 @@ class Vocabulary:
         """Count of real ingredients, excluding [PAD] and [MASK]."""
         return len(self.id_to_token) - N_SPECIAL
 
+    @property
+    def coarse_size(self) -> int:
+        """Total coarse vocabulary size, including coarse [PAD]/[MASK]."""
+        return len(self.coarse_id_to_token)
+
     def encode(self, ingredient: str) -> int:
-        """Ingredient string -> id. Unknown ingredients map to [MASK] id
+        """Ingredient string -> fine id. Unknown ingredients map to [MASK] id
         (id 1) as a safe fallback; in practice every recipe ingredient is
         in-vocabulary because the vocab was built from the same corpus."""
         return self.token_to_id.get(ingredient, MASK_ID)
@@ -58,12 +132,45 @@ class Vocabulary:
             return self.id_to_token[idx]
         return MASK_TOKEN
 
+    def coarse_of(self, fine_id: int) -> int:
+        """Coarse id for a fine id. Out-of-range ids map to coarse [MASK]."""
+        if 0 <= fine_id < len(self.coarse_ids):
+            return self.coarse_ids[fine_id]
+        return COARSE_MASK_ID
+
+    def coarse_ids_tensor(self):
+        """
+        The fine-id -> coarse-id map as a torch LongTensor, ready to register
+        as a model buffer.  Imported lazily so this module has no hard torch
+        dependency (vocab building runs in plain numpy environments).
+        """
+        import torch
+        return torch.tensor(self.coarse_ids, dtype=torch.long)
+
     @classmethod
     def from_file(cls, path: str | Path) -> "Vocabulary":
-        """Load from the corpus vocabulary.json (the file build_corpus.py
-        wrote: {"size": N, "ingredients": [{"name","count","category"},...]})."""
+        """
+        Load from the corpus vocabulary.json.
+
+        New (#4) schema:
+          {"size", "coarse_size", "coarse_vocab": [...],
+           "ingredients": [{"name","count","category","coarse","coarse_id"}]}
+        Old schema (pre-#4):
+          {"size", "ingredients": [{"name","count","category"}]}
+        Old files have no coarse information; they load via the degenerate
+        single-[JUNK]-coarse fallback so legacy checkpoints still run.
+        """
         obj = json.load(open(path, encoding="utf-8"))
         names = [item["name"] for item in obj["ingredients"]]
+
+        if "coarse_vocab" in obj and all(
+            "coarse_id" in item for item in obj["ingredients"]
+        ):
+            coarse_vocab = obj["coarse_vocab"]
+            fine_to_coarse = [item["coarse_id"] for item in obj["ingredients"]]
+            return cls(names, coarse_vocab, fine_to_coarse)
+
+        # old file: no coarse level -> degenerate fallback
         return cls(names)
 
 
