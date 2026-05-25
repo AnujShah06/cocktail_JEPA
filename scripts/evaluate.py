@@ -60,7 +60,13 @@ def main() -> int:
     perturbed = load_recipes(splits / "perturbations.jsonl")
     test_ds = CocktailDataset(test, vocab, max_len=args.max_len,
                               n_frequencies=args.n_frequencies)
-    pert_ds = CocktailDataset(perturbed, vocab, max_len=args.max_len,
+    # The perturbation set contains types that APPEND an ingredient
+    # (insert, incompatible_pair) -- a recipe at the length limit would
+    # then exceed max_len and be silently dropped by CocktailDataset's
+    # length filter.  That drop is biased (only near-limit recipes are
+    # lost), which would skew those types' AUROC.  Give the perturbation
+    # dataset headroom (+2 slots) so every perturbed recipe is scored.
+    pert_ds = CocktailDataset(perturbed, vocab, max_len=args.max_len + 2,
                               n_frequencies=args.n_frequencies)
     print(f"test recipes: {len(test_ds)}  perturbed recipes: {len(pert_ds)}")
 
