@@ -18,7 +18,10 @@ via env vars -- see config.py. No code changes needed to move to cloud.
 from __future__ import annotations
 
 import argparse
+import random
 
+import numpy as np
+import torch
 from torch.utils.data import DataLoader
 
 from cocktail_jepa.config import CONFIG
@@ -27,6 +30,26 @@ from cocktail_jepa.data.vocab import Vocabulary, proportion_encoding_dim
 from cocktail_jepa.logging import get_logger
 from cocktail_jepa.model.jepa import build_jepa
 from cocktail_jepa.train.loop import TrainConfig, train
+
+
+def _seed_everything(seed: int) -> None:
+    """
+    Seed every RNG that affects a training run, so a given --seed is
+    fully reproducible.  This is what makes the #17 multi-seed study
+    valid: each seed must deterministically fix (a) weight init, (b) the
+    DataLoader shuffle order, and (c) the collator's mask sampling -- and
+    a re-run of the same seed must reproduce the result exactly.
+
+    Note: torch.manual_seed covers weight init and the default-generator
+    draws; the DataLoader is additionally given an explicit generator in
+    main(), and the collator its own seed, so all three variance sources
+    trace back to this one number.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def main() -> int:
@@ -43,9 +66,14 @@ def main() -> int:
     # fixed across the sweep so the sweep isolates the lambda effect.
     ap.add_argument("--sigreg-weight", type=float, default=1.0)
     ap.add_argument("--proportion-aux-weight", type=float, default=0.5)
+    # --seed fixes init, data-shuffle order, and mask sampling, so a run
+    # is reproducible.  The #17 multi-seed study varies ONLY this.
+    ap.add_argument("--seed", type=int, default=CONFIG.seed)
     ap.add_argument("--smoke", action="store_true",
                     help="tiny fast run to verify the loop works")
     args = ap.parse_args()
+
+    _seed_everything(args.seed)
 
     if args.smoke:
         args.epochs, args.batch_size, args.run_name = 2, 32, "smoke"
@@ -69,10 +97,16 @@ def main() -> int:
         train_ds.recipes = train_ds.recipes[:256]
         val_ds.recipes = val_ds.recipes[:128]
 
+    # the DataLoader shuffle order is made deterministic per --seed via an
+    # explicit generator; the collator's mask sampling likewise uses the
+    # seed.  Together with _seed_everything's torch.manual_seed (init),
+    # all three variance sources trace back to the one --seed.
+    loader_gen = torch.Generator()
+    loader_gen.manual_seed(args.seed)
     train_loader = DataLoader(
         train_ds, batch_size=args.batch_size, shuffle=True,
-        collate_fn=JEPAMaskCollator(deterministic=False, seed=CONFIG.seed),
-        drop_last=True,
+        collate_fn=JEPAMaskCollator(deterministic=False, seed=args.seed),
+        drop_last=True, generator=loader_gen,
     )
     val_loader = DataLoader(
         val_ds, batch_size=args.batch_size, shuffle=False,
@@ -99,6 +133,7 @@ def main() -> int:
         run_name=args.run_name,
         config={"epochs": args.epochs, "batch_size": args.batch_size,
                 "lr": args.lr, "device": CONFIG.device,
+                "seed": args.seed,
                 "sigreg_weight": args.sigreg_weight,
                 "proportion_aux_weight": args.proportion_aux_weight,
                 "model": model.num_parameters()},
