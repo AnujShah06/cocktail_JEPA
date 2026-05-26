@@ -172,9 +172,10 @@ def main() -> int:
 
         train_loss = epoch_loss / max(1, len(train_loader))
         val = _evaluate(model, val_loader, device)
-        logger.log(step=step, epoch=epoch,
-                   train_loss=train_loss, lr=scheduler.get_last_lr()[0],
-                   **{f"val_{k}": v for k, v in val.items()})
+        metrics = {"epoch": epoch, "train_loss": train_loss,
+                   "lr": scheduler.get_last_lr()[0]}
+        metrics.update({f"val_{k}": v for k, v in val.items()})
+        logger.log(metrics, step=step)
 
         if val["loss"] < best_val:
             best_val = val["loss"]
