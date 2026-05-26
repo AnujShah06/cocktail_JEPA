@@ -58,8 +58,16 @@ def recipe_energy(
     # embed the full recipe once; reused for every masked-slot pass
     tokens = model.tokens(ids, props)                       # [B, L, d]
 
-    # target view: the FULL recipe through the target encoder, once
-    target_emb = model.target_encoder(tokens, pad_mask)     # [B, L, d]
+    # target view: the FULL recipe through the target branch, once.
+    # This must match how the model was TRAINED (see jepa.py forward):
+    # with EMA the separate target encoder produced the target; without
+    # EMA (the #43 ablation) the context encoder did.  Using the wrong
+    # branch here would score the ablation model against an encoder it
+    # never trained against.
+    if getattr(model.cfg, "use_ema", True):
+        target_emb = model.target_encoder(tokens, pad_mask)  # [B, L, d]
+    else:
+        target_emb = model.context_encoder(tokens, pad_mask)  # [B, L, d]
 
     # accumulate per-slot error; only real slots contribute
     err_sum = torch.zeros(B, device=device)

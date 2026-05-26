@@ -66,6 +66,11 @@ def main() -> int:
     # fixed across the sweep so the sweep isolates the lambda effect.
     ap.add_argument("--sigreg-weight", type=float, default=1.0)
     ap.add_argument("--proportion-aux-weight", type=float, default=0.5)
+    # --no-ema is the #43 "without EMA" ablation: no separate momentum
+    # target encoder; the context encoder is the target branch under a
+    # stop-gradient.  Default keeps EMA on (the reference model).
+    ap.add_argument("--no-ema", action="store_true",
+                    help="#43 ablation: train without the EMA target encoder")
     # --seed fixes init, data-shuffle order, and mask sampling, so a run
     # is reproducible.  The #17 multi-seed study varies ONLY this.
     ap.add_argument("--seed", type=int, default=CONFIG.seed)
@@ -123,6 +128,7 @@ def main() -> int:
         coarse_ids=vocab.coarse_ids,
         sigreg_weight=args.sigreg_weight,
         proportion_aux_weight=args.proportion_aux_weight,
+        use_ema=not args.no_ema,
     )
     print(f"device: {CONFIG.device}")
     print(f"model parameters: {model.num_parameters()}")
@@ -134,6 +140,7 @@ def main() -> int:
         config={"epochs": args.epochs, "batch_size": args.batch_size,
                 "lr": args.lr, "device": CONFIG.device,
                 "seed": args.seed,
+                "use_ema": not args.no_ema,
                 "sigreg_weight": args.sigreg_weight,
                 "proportion_aux_weight": args.proportion_aux_weight,
                 "model": model.num_parameters()},

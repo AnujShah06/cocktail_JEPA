@@ -68,6 +68,17 @@ class JEPAConfig:
     dropout: float = 0.1
     ema_decay: float = 0.996
 
+    # --- #43 ablation: EMA on/off ------------------------------------
+    # use_ema=True  -> the standard setup: a SEPARATE target encoder,
+    #                  updated only by EMA (the reference model).
+    # use_ema=False -> the "without EMA" ablation: NO separate target
+    #                  encoder.  The context encoder is used for the
+    #                  target branch too, under a stop-gradient -- the
+    #                  SimSiam-style no-momentum ablation.  This isolates
+    #                  the momentum mechanism: same predictive setup,
+    #                  same stop-gradient, just no slow target network.
+    use_ema: bool = True
+
     # --- #18: SIGReg single-regularizer objective --------------------
     # one trade-off hyperparameter replaces the old var_weight + cov_weight
     sigreg_weight: float = 1.0
@@ -152,9 +163,17 @@ class CocktailJEPA(nn.Module):
         context_tokens = self.tokens.apply_mask(tokens, mask_index)
         context_emb = self.context_encoder(context_tokens, pad_mask)  # [B,L,d]
 
-        # 3. TARGET view: full recipe through the target encoder, no grad
+        # 3. TARGET view: full recipe -> target latent at the masked slot.
+        #    With EMA (reference): a SEPARATE target encoder produces it.
+        #    Without EMA (ablation): the CONTEXT encoder itself produces
+        #    it, under a stop-gradient -- no separate momentum network.
+        #    Either way the target is detached: the predictor learns to
+        #    match it, the target branch carries no gradient.
         with torch.no_grad():
-            target_emb = self.target_encoder(tokens, pad_mask)        # [B,L,d]
+            if self.cfg.use_ema:
+                target_emb = self.target_encoder(tokens, pad_mask)
+            else:
+                target_emb = self.context_encoder(tokens, pad_mask)
         target_latent = target_emb[batch_idx, mask_index].detach()    # [B,d]
 
         # 4. predictor: query = the masked slot's context embedding
@@ -236,7 +255,13 @@ class CocktailJEPA(nn.Module):
 
         Called by the training loop AFTER each optimizer step.
         target <- decay * target + (1 - decay) * context
+
+        No-op when use_ema is False (the ablation): there is no separate
+        target encoder in use, so there is nothing to update.  The loop
+        can call this unconditionally.
         """
+        if not self.cfg.use_ema:
+            return
         d = self.cfg.ema_decay if decay is None else decay
         for tgt, src in zip(self.target_encoder.parameters(),
                             self.context_encoder.parameters()):
