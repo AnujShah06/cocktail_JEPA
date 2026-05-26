@@ -74,6 +74,15 @@ def main() -> int:
     # --seed fixes init, data-shuffle order, and mask sampling, so a run
     # is reproducible.  The #17 multi-seed study varies ONLY this.
     ap.add_argument("--seed", type=int, default=CONFIG.seed)
+    # --d-model and --enc-layers are the #16 scaling-study knobs.  They
+    # are JEPAConfig fields, but train.py otherwise hardcodes the
+    # defaults; exposing them lets the scaling runs vary width and depth
+    # without code edits.  Defaults match the reference model exactly, so
+    # omitting them reproduces the locked 0.690 baseline.
+    ap.add_argument("--d-model", type=int, default=192,
+                    help="#16 scaling: encoder width")
+    ap.add_argument("--enc-layers", type=int, default=3,
+                    help="#16 scaling: encoder depth")
     ap.add_argument("--smoke", action="store_true",
                     help="tiny fast run to verify the loop works")
     args = ap.parse_args()
@@ -129,6 +138,8 @@ def main() -> int:
         sigreg_weight=args.sigreg_weight,
         proportion_aux_weight=args.proportion_aux_weight,
         use_ema=not args.no_ema,
+        d_model=args.d_model,
+        enc_layers=args.enc_layers,
     )
     print(f"device: {CONFIG.device}")
     print(f"model parameters: {model.num_parameters()}")
@@ -141,6 +152,8 @@ def main() -> int:
                 "lr": args.lr, "device": CONFIG.device,
                 "seed": args.seed,
                 "use_ema": not args.no_ema,
+                "d_model": args.d_model,
+                "enc_layers": args.enc_layers,
                 "sigreg_weight": args.sigreg_weight,
                 "proportion_aux_weight": args.proportion_aux_weight,
                 "model": model.num_parameters()},
