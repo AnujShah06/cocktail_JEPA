@@ -131,6 +131,9 @@ def train(
     step = 0
     best_val = float("inf")
     best_path = run_dir / "best.ckpt"
+    # tracks the most recent periodic checkpoint so the previous one can
+    # be deleted when a newer is written (keep-latest-only, bounds disk)
+    prev_periodic = None
 
     for epoch in range(cfg.epochs):
         epoch_loss = 0.0
@@ -171,10 +174,19 @@ def train(
 
         logger.log(log_row, step=epoch)
 
-        # periodic checkpoint
+        # periodic checkpoint -- for crash recovery only.  We keep just
+        # the SINGLE most recent one: the older periodic checkpoint is
+        # deleted as soon as a newer one is written, so a run's periodic
+        # checkpoint footprint stays constant (~one file) instead of
+        # growing one file every ckpt_every epochs.  best.ckpt is a
+        # separate path and is never touched here.
         if (epoch + 1) % cfg.ckpt_every == 0:
-            save_checkpoint(run_dir / f"epoch_{epoch+1}.ckpt", model,
+            new_periodic = run_dir / f"epoch_{epoch+1}.ckpt"
+            save_checkpoint(new_periodic, model,
                             optimizer, scheduler, step=step)
+            if prev_periodic is not None and prev_periodic.exists():
+                prev_periodic.unlink()
+            prev_periodic = new_periodic
 
     logger.summary(best_val_loss=best_val, total_steps=step)
     return best_path
