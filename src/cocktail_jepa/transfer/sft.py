@@ -126,6 +126,33 @@ def evaluate_head(
     return correct / max(1, total)
 
 
+def majority_class_accuracy(val_batches: list[dict]) -> float:
+    """
+    The trivial floor: accuracy of always predicting the most common class
+    in the VALIDATION set.
+
+    This is the non-learned reference the #43 coherence table always shows
+    beneath its learned rows.  Without it, a reader cannot tell whether a
+    from-scratch encoder's accuracy is a meaningful representation result or
+    merely above chance.  Majority-class is the honest floor: it uses no
+    encoder at all, just the label distribution.
+
+    Note the convention: the floor proves the WEAK claim (any signal beats
+    guessing); the pretrained-vs-from-scratch gap proves the STRONG claim
+    (self-supervision learned a transferable representation).  The gap is
+    the headline; the floor is context.
+    """
+    counts: dict[int, int] = {}
+    total = 0
+    for batch in val_batches:
+        for lbl in batch["label"].tolist():
+            counts[lbl] = counts.get(lbl, 0) + 1
+            total += 1
+    if total == 0:
+        return 0.0
+    return max(counts.values()) / total
+
+
 def run_transfer_comparison(
     pretrained: CocktailJEPA,
     from_scratch: CocktailJEPA,
@@ -143,11 +170,15 @@ def run_transfer_comparison(
     FROM-SCRATCH frozen encoder -- and record val accuracy. The pretrained
     advantage should be largest when labels are scarce.
 
-    Returns {fraction: {"pretrained": acc, "from_scratch": acc}}.
+    Also records the majority-class accuracy as a non-learned floor (the
+    same fixed value at every fraction, since it ignores the training data).
+
+    Returns {"majority_class": float,
+             "fractions": {fraction: {"pretrained", "from_scratch", ...}}}.
     """
     d_model = pretrained.cfg.d_model
     n_train = len(train_batches)
-    results: dict = {}
+    fractions: dict = {}
 
     for frac in label_fractions:
         k = max(1, int(n_train * frac))
@@ -161,32 +192,41 @@ def run_transfer_comparison(
         scr = train_head(from_scratch, scr_head, slice_batches, val_batches,
                          device, epochs=epochs)
 
-        results[frac] = {
+        fractions[frac] = {
             "pretrained": pre["best_val_acc"],
             "from_scratch": scr["best_val_acc"],
             "n_train_batches": k,
         }
-    return results
+
+    return {
+        "majority_class": majority_class_accuracy(val_batches),
+        "fractions": fractions,
+    }
 
 
 def format_transfer_report(results: dict, n_classes: int) -> str:
     """Pretty-print the transfer comparison."""
     chance = 1.0 / n_classes
+    majority = results["majority_class"]
+    fractions = results["fractions"]
     lines = [
         "SFT TRANSFER EXPERIMENT",
-        "=" * 52,
+        "=" * 60,
         "",
         f"Task: classify base-spirit family ({n_classes} classes, "
         f"chance = {chance:.2f})",
         "Encoder is FROZEN; only the classification head is trained.",
         "The base-spirit slot is masked -- the head must INFER the family.",
         "",
+        f"  floor: majority-class accuracy = {majority:.3f}  "
+        f"(no encoder; always predict the commonest class)",
+        "",
         f"{'label fraction':>16} | {'pretrained':>11} | "
         f"{'from-scratch':>12} | {'gap':>6}",
-        "-" * 52,
+        "-" * 60,
     ]
-    for frac in sorted(results):
-        r = results[frac]
+    for frac in sorted(fractions):
+        r = fractions[frac]
         gap = r["pretrained"] - r["from_scratch"]
         lines.append(
             f"{frac:>15.0%}  | {r['pretrained']:>10.3f}  | "
@@ -194,8 +234,11 @@ def format_transfer_report(results: dict, n_classes: int) -> str:
         )
     lines += [
         "",
-        "Interpretation: a positive gap means the self-supervised JEPA",
-        "representation transfers. The gap should be LARGEST at small",
-        "label fractions -- that is the value of pretraining.",
+        "Interpretation: the majority-class floor shows what zero learning",
+        "achieves; the from-scratch encoder shows what a random (but",
+        "structured) representation achieves; the pretrained row is the",
+        "JEPA.  A positive pretrained-minus-from-scratch gap means the",
+        "self-supervised representation transfers -- and the gap should be",
+        "LARGEST at small label fractions, which is the value of pretraining.",
     ]
     return "\n".join(lines)
