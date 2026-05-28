@@ -18,11 +18,19 @@ pointwise mutual information,
 
 high when two ingredients appear together more than independence predicts
 (gin & tonic), low/negative when they avoid each other (gin & milk).  A
-coherent recipe is one whose ingredient pairs are mutually expected, so its
-COHERENCE is the mean pairwise PMI over all pairs in the recipe.
+coherent recipe is one whose WEAKEST pair is still mutually expected, so
+its COHERENCE is the MINIMUM pairwise PMI across all pairs in the recipe.
 
 The harness convention is HIGHER == more incoherent (matching the JEPA
-energy), so the ENERGY is the negative mean pairwise PMI.
+energy), so the ENERGY is the negative min pairwise PMI.
+
+Aggregation choice -- min, not mean -- is load-bearing.  Mean over pairs
+dilutes a single bad pair in a recipe of many good ones, which inverted
+the PMI's read on perturbations that add or substitute one ingredient
+against a real recipe (empirically: insert/substitute AUROC dropped below
+0.5 under the mean).  Min says "a recipe is only as coherent as its
+weakest pair", which is correct EBM semantics and closer to how a human
+judges a cocktail.  See coherence() for the full discussion.
 
 Design decisions, each defensible in a deep-dive:
 
@@ -206,24 +214,37 @@ class PMIEnergy:
 
     def coherence(self, recipe: dict) -> float:
         """
-        Mean pairwise PMI over the recipe's ingredient pairs.
+        Coherence of a recipe = MINIMUM pairwise PMI across its ingredient
+        pairs.
 
-        HIGH coherence == ingredients mutually expected to co-occur.
-        A 0- or 1-ingredient recipe has no pairs; it returns the floor,
-        treating a degenerate recipe as minimally coherent.
+        Aggregation choice (mean vs. min) is load-bearing here and worth
+        stating explicitly.  An earlier version averaged pair PMIs.  That is
+        the wrong operator for an energy function: a recipe with one
+        genuinely bad pair and ten good pairs averages out to a "fine"
+        score, exactly the case where an `insert` or `substitute`
+        perturbation adds a single off-manifold pair to a real recipe and
+        drowns it in the original's good pairs.  Empirically we saw PMI
+        AUROC INVERT below 0.5 on those perturbation types under the mean.
+
+        The MIN aggregation says: a recipe is only as coherent as its
+        weakest pair.  This is the correct energy semantics -- an EBM
+        should be governed by the worst constraint violation, not by an
+        average over satisfied ones.  It is also closer to how a human
+        judges a cocktail: one truly bad pair sinks the drink regardless
+        of the rest.
+
+        A 0- or 1-ingredient recipe has no pairs; it returns 0 (neutral),
+        which is honest non-information.
         """
         ings = sorted({ing["ingredient"] for ing in recipe["ingredients"]})
         if len(ings) < 2:
-            # Degenerate: no pairs to score.  Return 0 so the energy is 0 --
-            # this is rare in practice (the dataset filters to >=2 ingredients
-            # anyway) and a neutral score is the honest non-claim.
             return 0.0
         pmis = [self._pair_score(a, b) for a, b in combinations(ings, 2)]
-        return sum(pmis) / len(pmis)
+        return min(pmis)
 
     def energy(self, recipe: dict) -> float:
         """
-        Coherence ENERGY: negative mean pairwise PMI.
+        Coherence ENERGY: negative MIN pairwise PMI.
 
         Higher == more incoherent, matching the JEPA energy convention so
         this drops straight into evaluate_energy as another row.
