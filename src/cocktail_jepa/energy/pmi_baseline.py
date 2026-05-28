@@ -73,7 +73,7 @@ class PMIEnergy:
         pair_pmi: dict[frozenset[str], float],
         unigram: dict[str, int],
         n_recipes: int,
-        floor_pmi: float,
+        p_ab_floor: float,
         smoothing: float,
     ):
         # PMI for every pair seen in training (symmetric, keyed by a
@@ -82,11 +82,16 @@ class PMIEnergy:
         # per-ingredient document frequency (how many recipes contain it).
         self._unigram = unigram
         self._n_recipes = n_recipes
-        # PMI assigned to a pair never co-occurring in training: the add-k
-        # smoothed value for a zero-count pair.  Strongly negative => the
-        # pair reads as incoherent, but finite.
-        self._floor_pmi = floor_pmi
+        # P(a,b) for an unseen pair (smoothed-zero pair mass).  The per-pair
+        # floor PMI = log(p_ab_floor / (P(a) * P(b))) is computed at scoring
+        # time using the ACTUAL unigrams of the pair -- see _pair_score.
+        self._p_ab_floor = p_ab_floor
         self._smoothing = smoothing
+        # fallback unigram probability for an ingredient absent from train.
+        # Treat it as a hypothetical "appeared in one recipe": maximally
+        # rare but finite, so the PMI of an unseen-ingredient pair is the
+        # log of a tiny numerator over a not-tinier denominator (negative).
+        self._p_unigram_unseen = 1.0 / (n_recipes + 1)
 
     # -- fitting -----------------------------------------------------------
 
@@ -123,13 +128,18 @@ class PMIEnergy:
                 pair_count[key] = pair_count.get(key, 0) + 1
 
         k = smoothing
-        # smoothed denominators: every possible pair gets +k, so the total
-        # pair mass grows by k * (#possible pairs).  We approximate the
-        # possible-pair count by the observed-vocabulary pair space, which
-        # is what governs the floor for unseen pairs.
+        # The probability model:  every probability is per-RECIPE, so the
+        # PMI ratio  P(a,b) / (P(a)*P(b))  is well-defined.
+        #   P(a)   = recipes containing a    / n_recipes
+        #   P(b)   = recipes containing b    / n_recipes
+        #   P(a,b) = recipes containing both / n_recipes
+        # Smoothing: add k "phantom" recipes per pair, so an unseen pair has
+        # k/(n + k*n_possible) probability rather than zero.
         vocab = list(unigram)
         n_possible_pairs = len(vocab) * (len(vocab) - 1) / 2 or 1.0
-        total_pair_mass = sum(pair_count.values()) + k * n_possible_pairs
+        # smoothed effective number of "recipes" in the joint distribution:
+        # real recipe count + k phantom recipes per possible pair.
+        n_eff = n + k * n_possible_pairs
 
         def p_unigram(a: str) -> float:
             return unigram.get(a, 0) / n
@@ -137,33 +147,62 @@ class PMIEnergy:
         pair_pmi: dict[frozenset[str], float] = {}
         for key, c in pair_count.items():
             a, b = tuple(key) if len(key) == 2 else (next(iter(key)),) * 2
-            p_ab = (c + k) / total_pair_mass
+            p_ab = (c + k) / n_eff
             pa, pb = p_unigram(a), p_unigram(b)
             if pa <= 0 or pb <= 0:
                 continue
             pair_pmi[key] = math.log(p_ab / (pa * pb))
 
-        # floor PMI for an unseen pair: numerator is the smoothed count of a
-        # zero-count pair; denominator uses the median unigram probability
-        # so the floor is representative rather than tied to one ingredient.
-        sorted_p = sorted(p_unigram(a) for a in vocab)
-        median_p = sorted_p[len(sorted_p) // 2] if sorted_p else (1.0 / n)
-        p_ab_floor = k / total_pair_mass
-        floor_pmi = math.log(p_ab_floor / (median_p * median_p))
+        # P(a,b) for an unseen pair: smoothed-zero count over n_eff.
+        # The per-pair floor PMI = log(p_ab_floor / (P(a) * P(b))) is computed
+        # at scoring time from the ACTUAL unigrams of a and b -- see
+        # _pair_score.  This is correct PMI semantics: two common ingredients
+        # that never co-occur (gin + milk) get a STRONGLY NEGATIVE PMI, while
+        # two rare ingredients that never co-occur get a less-strongly-
+        # negative PMI (with weak unigram evidence the incoherence claim is
+        # weaker -- this is the right behavior).
+        p_ab_floor = k / n_eff
 
         return cls(
             pair_pmi=pair_pmi,
             unigram=unigram,
             n_recipes=n,
-            floor_pmi=floor_pmi,
+            p_ab_floor=p_ab_floor,
             smoothing=smoothing,
         )
 
     # -- scoring -----------------------------------------------------------
 
+    def _p_unigram(self, a: str) -> float:
+        """P(a) = document frequency / corpus size, with a small-positive
+        fallback for ingredients absent from training so PMI stays finite."""
+        c = self._unigram.get(a, 0)
+        if c == 0:
+            return self._p_unigram_unseen
+        return c / self._n_recipes
+
     def _pair_score(self, a: str, b: str) -> float:
-        """PMI of a single pair, falling back to the floor for unseen pairs."""
-        return self._pair_pmi.get(frozenset((a, b)), self._floor_pmi)
+        """
+        PMI of a single pair.
+
+        For pairs SEEN in training: the stored, observed PMI -- positive for
+        pairs that co-occur more than independence predicts, negative for
+        pairs that co-occur less than independence predicts.
+
+        For pairs UNSEEN in training: compute the floor PMI from the actual
+        unigrams of a and b, log(p_ab_floor / (P(a)*P(b))).  Two common
+        ingredients that never co-occur (gin + milk) hit a STRONGLY NEGATIVE
+        PMI here -- which is the semantically correct "these don't go
+        together" signal.  Two rare ingredients that never co-occur get a
+        less-strongly-negative PMI, which is also right: with weak unigram
+        evidence we cannot make a strong incoherence claim.
+        """
+        key = frozenset((a, b))
+        if key in self._pair_pmi:
+            return self._pair_pmi[key]
+        pa = self._p_unigram(a)
+        pb = self._p_unigram(b)
+        return math.log(self._p_ab_floor / (pa * pb))
 
     def coherence(self, recipe: dict) -> float:
         """
@@ -175,7 +214,10 @@ class PMIEnergy:
         """
         ings = sorted({ing["ingredient"] for ing in recipe["ingredients"]})
         if len(ings) < 2:
-            return self._floor_pmi
+            # Degenerate: no pairs to score.  Return 0 so the energy is 0 --
+            # this is rare in practice (the dataset filters to >=2 ingredients
+            # anyway) and a neutral score is the honest non-claim.
+            return 0.0
         pmis = [self._pair_score(a, b) for a, b in combinations(ings, 2)]
         return sum(pmis) / len(pmis)
 

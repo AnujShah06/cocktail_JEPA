@@ -50,8 +50,16 @@ def main() -> int:
     print(f"fitting PMI on {len(train)} train recipes "
           f"(add-k smoothing k={args.smoothing}) ...")
     pmi = PMIEnergy.fit(train, smoothing=args.smoothing)
+    # diagnostic: floor PMI for two median-frequency ingredients gives a sense
+    # of where unseen-pair scores land for typical ingredients.
+    sorted_p = sorted(pmi._unigram.values())
+    median_count = sorted_p[len(sorted_p) // 2] if sorted_p else 1
+    import math as _m
+    median_p = median_count / pmi._n_recipes
+    floor_for_median_pair = _m.log(pmi._p_ab_floor / (median_p * median_p))
     print(f"  learned PMI for {len(pmi._pair_pmi)} co-occurring pairs; "
-          f"unseen-pair floor PMI = {pmi._floor_pmi:.3f}\n")
+          f"unseen-pair floor PMI for two median-frequency ingredients "
+          f"= {floor_for_median_pair:.3f}\n")
 
     real_scores = pmi.score_recipes(test)
     pert_scores = pmi.score_recipes(perturbed)
